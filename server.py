@@ -1,3 +1,4 @@
+import asyncio
 import gc
 import html
 import logging
@@ -376,15 +377,216 @@ def is_azure_configured() -> bool:
 
 def get_default_provider() -> str:
     forced = (os.environ.get("AI_PROVIDER") or "").strip().lower()
-    if forced in ("local", "azure"):
+    if forced in ("auto", "azure", "local", "simulation"):
         return forced
 
+    if is_azure_configured():
+        return "azure"
     local_models = find_local_models()
     if local_models:
         return "local"
-    if is_azure_configured():
-        return "azure"
-    return "none"
+    return "simulation"
+
+
+def extract_character_block(name_query: str) -> str:
+    """Extrae el bloque documental de un personaje desde conocimiento/Jujutsu_encyclopedia.md."""
+    knowledge_dir = Path(__file__).parent / "conocimiento"
+    encyclopedia_file = knowledge_dir / "Jujutsu_encyclopedia.md"
+    if not encyclopedia_file.is_file():
+        md_files = list(knowledge_dir.glob("*.md"))
+        if not md_files:
+            return ""
+        encyclopedia_file = md_files[0]
+
+    try:
+        content = encyclopedia_file.read_text(encoding="utf-8")
+    except Exception as e:
+        logger.error(f"Error al leer enciclopedia para simulación: {e}")
+        return ""
+
+    lines = content.splitlines()
+    in_block = False
+    block_lines = []
+    current_level = 0
+    query_norm = normalize_text(name_query)
+
+    for line in lines:
+        m = re.match(r'^(#{2,4})\s+(.+)$', line)
+        if m:
+            level = len(m.group(1))
+            title = m.group(2)
+            title_norm = normalize_text(title)
+            if not in_block:
+                if query_norm in title_norm:
+                    in_block = True
+                    current_level = level
+                    block_lines.append(line)
+            else:
+                if level <= current_level:
+                    break
+                else:
+                    block_lines.append(line)
+        elif in_block:
+            block_lines.append(line)
+
+    return "\n".join(block_lines).strip()
+
+
+def get_emergency_simulation_response(personality_key: str, user_query: str, reveal_technique: bool) -> Dict[str, Any]:
+    """Genera la respuesta del Modo Simulación de Emergencia (Prioridad 3) leyendo directamente la enciclopedia."""
+    pkey = (personality_key or "gojo").lower().strip()
+    p_info = PERSONALITY_PROMPTS.get(pkey, PERSONALITY_PROMPTS["gojo"])
+
+    intros = {
+        "gojo": (
+            "*(🚨 MODO SIMULACIÓN DE EMERGENCIA - ARCHIVO CANÓNICO JUJUTSU)*\n\n"
+            "¡Yo! Soy Satoru Gojo. Como los servidores en la nube y los núcleos de inferencia local no están disponibles, "
+            "tranquilo: con mis Seis Ojos (Rikugan) no necesito intermediarios. "
+            "He extraído directamente el registro canónico de la Enciclopedia Jujutsu para ti:"
+        ),
+        "sukuna": (
+            "*(🚨 MODO SIMULACIÓN DE EMERGENCIA - ARCHIVO CANÓNICO JUJUTSU)*\n\n"
+            "Mocoso insolente... Los servidores remotos y los modelos locales son incapaces de contenerme. "
+            "Agradece que este Rey de las Maldiciones se digne a abrir los anales canónicos para grabarte la verdad:"
+        ),
+        "nanami": (
+            "*(🚨 MODO SIMULACIÓN DE EMERGENCIA - ARCHIVO CANÓNICO JUJUTSU)*\n\n"
+            "Soy Kento Nanami. Sin servidores remotos ni modelos locales en este entorno, perder el tiempo en conjeturas sería ineficiente. "
+            "Procedo a entregar el informe técnico extraído directamente de la Enciclopedia Jujutsu:"
+        ),
+        "neutral": (
+            "*(🚨 MODO SIMULACIÓN DE EMERGENCIA - ARCHIVO CANÓNICO JUJUTSU)*\n\n"
+            "[SISTEMA CANÓNICO OFFLINE]: Servidores en la nube y modelos locales no detectados. "
+            "Desplegando datos estructurados directamente desde conocimiento/Jujutsu_encyclopedia.md."
+        )
+    }
+
+    selected_intro = intros.get(pkey, intros["neutral"])
+    body_parts = [selected_intro]
+    sources_used = ["Jujutsu_encyclopedia.md"]
+
+    specific_chunks = []
+    if user_query and len(user_query.strip()) > 2:
+        specific_chunks = search_knowledge(user_query, top_k=2)
+
+    p_name_norm = normalize_text(p_info["name"])
+    q_norm = normalize_text(user_query)
+    asks_about_self = any(tok in q_norm for tok in p_name_norm.split()) or any(
+        w in q_norm for w in ["quien eres", "tecnica", "poder", "habilidad", "dominio", "expansion", "tu"]
+    )
+
+    if specific_chunks and not asks_about_self:
+        for chunk in specific_chunks:
+            sources_used.append(f"{chunk['title']} ({chunk['source']})")
+            body_parts.append(
+                f"\n\n### 📖 Registro Canónico: {chunk['full_header']}\n\n"
+                f"{chunk['text']}"
+            )
+    else:
+        char_block = extract_character_block(p_info["name"])
+        if not char_block:
+            for token in p_info["name"].split():
+                char_block = extract_character_block(token)
+                if char_block:
+                    break
+
+        if char_block:
+            body_parts.append(f"\n\n{char_block}")
+            sources_used.append(f"Expediente {p_info['name']} (Jujutsu_encyclopedia.md)")
+        else:
+            overview = get_knowledge_overview()
+            body_parts.append(f"\n\n[COMPENDIO GENERAL]:\n{overview}")
+
+    if reveal_technique:
+        body_parts.append(
+            "\n\n⚡ **[VOTO VINCULANTE SELLADO: REVELAR LA TÉCNICA - RENDIMIENTO AL 120%]**\n"
+            "Al divulgar abiertamente las condiciones y restricciones de la hechicería, el flujo de datos se maximiza:\n"
+        )
+        if pkey == "gojo":
+            body_parts.append(
+                "- **Fisiología Prefrontal:** Gojo utiliza los Seis Ojos como procesador continuo en segundo plano, "
+                "refrescando su cerebro 24/7 mediante un circuito perpetuo de Energía Maldita Inversa (RCT) para evitar el sobrecalentamiento neuronal.\n"
+                "- **Consumo Cuántico:** A diferencia de otros hechiceros donde cada técnica pierde energía por fricción espiritual, "
+                "el consumo de Gojo tiende infinitesimalmente a cero (lim pérdida → 0), regenerando más energía por segundo de la que gasta.\n"
+                "- **Expansión de Dominio (Unlimited Void):** Aplica Taishakuten mudra. Inunda el cerebro del rival con información sensorial infinita. "
+                "Una exposición de 0.2s inyecta medio año de datos brutos, paralizando las funciones motoras sin daño permanente en civiles."
+            )
+        elif pkey == "sukuna":
+            body_parts.append(
+                "- **Mecánica del Cuchillo:** Dismantle (Kai) es el corte base a distancia para objetos inanimados; "
+                "Cleave (Hachi) requiere contacto y se ajusta automáticamente a la dureza del objetivo para cercenarlo de un golpe.\n"
+                "- **El Corte que Parte el Mundo:** Voto Vinculante permanente que exige sello de manos Enmaten, "
+                "tres cánticos ('Escama de Dragón', 'Repulsión', 'Meteoros Gemelos') y guiar la trayectoria con una tercera mano para cortar el tejido del espacio mismo.\n"
+                "- **Horno Termobárico (Kamino):** Solo utilizable contra múltiples enemigos dentro de Malevolent Shrine. "
+                "El polvo de materia pulverizada por Cleave y Dismantle actúa como aerosol inflamable, provocando una explosión termobárica ineludible en 200m de radio."
+            )
+        elif pkey == "nanami":
+            body_parts.append(
+                "- **Proporción Áurea Forzada:** La técnica Ratio divide cualquier longitud en 10 partes e impone un punto débil forzoso en la razón 7:3, "
+                "garantizando daño crítico con su espada roma envuelta en tela.\n"
+                "- **Voto de Horas Extras (Overtime):** De 9:00 a 18:00 reprime su energía al 80-90%. Al iniciar horas extras, su Output salta al 110-120% de su capacidad total.\n"
+                "- **Registro Histórico de Kokusen:** Posee el récord oficial de 4 Destellos Negros consecutivos, "
+                "lo que le otorgó una comprensión profunda de la química molecular de la energía maldita."
+            )
+        else:
+            body_parts.append(
+                "- **Mecánica Fundamental:** Toda técnica innata está grabada en la corteza prefrontal derecha y se alimenta de emociones negativas generadas en el tanden.\n"
+                "- **Inversión de Técnica:** Multiplicar dos flujos de energía negativa produce energía positiva (RCT), indispensable para regenerar tejidos biológicos humanos."
+            )
+
+    full_answer = "".join(body_parts)
+    return {
+        "answer": full_answer,
+        "sources": list(dict.fromkeys(sources_used))
+    }
+
+
+def execute_azure_chat(endpoint: str, deployment: str, system_instructions: str, user_query: str, max_tokens: int) -> str:
+    """Ejecuta la inferencia sincrónica contra Azure AI Foundry."""
+    client = get_openai_client(endpoint)
+    response = client.responses.create(
+        model=deployment,
+        instructions=system_instructions,
+        input=user_query,
+        max_output_tokens=max_tokens,
+    )
+    answer = getattr(response, "output_text", None)
+    if not answer:
+        raise ValueError("Azure AI Foundry no generó una respuesta de texto.")
+    return answer
+
+
+def execute_local_chat(model_path: str, system_instructions: str, user_query: str, max_tokens: int, personality_name: str) -> str:
+    """Ejecuta la inferencia sincrónica local con llama-cpp-python."""
+    n_ctx = int(os.environ.get("LOCAL_N_CTX", "4096"))
+    n_gpu = int(os.environ.get("LOCAL_N_GPU_LAYERS", "0"))
+    llm = get_local_llm(model_path, n_ctx=n_ctx, n_gpu_layers=n_gpu)
+
+    try:
+        output = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": system_instructions},
+                {"role": "user", "content": user_query},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.1,
+        )
+    except ValueError as ve:
+        if "system" in str(ve).lower():
+            logger.info("El modelo local no admite rol 'system'; adaptando en turno 'user'.")
+            prompt_combinado = f"{system_instructions}\n\nPregunta del usuario:\n{user_query}\n\nRespuesta canónica de {personality_name}:"
+            output = llm.create_chat_completion(
+                messages=[{"role": "user", "content": prompt_combinado}],
+                max_tokens=max_tokens,
+                temperature=0.1,
+            )
+        else:
+            raise
+
+    answer = output["choices"][0]["message"]["content"]
+    if not answer:
+        raise ValueError("El modelo local devolvió una respuesta vacía.")
+    return answer
 
 
 def get_local_llm(model_path: str, n_ctx: int = 4096, n_gpu_layers: int = 0):
@@ -432,13 +634,21 @@ def get_providers():
 
     return {
         "default_provider": default_p,
-        "local": {
-            "available": len(local_models) > 0,
-            "models": local_models,
-        },
+        "contingency_priority": ["azure", "local", "simulation"],
         "azure": {
             "available": azure_ok,
             "deployment": deployment if azure_ok else None,
+            "priority": 1,
+        },
+        "local": {
+            "available": len(local_models) > 0,
+            "models": local_models,
+            "priority": 2,
+        },
+        "simulation": {
+            "available": True,
+            "source": "conocimiento/Jujutsu_encyclopedia.md",
+            "priority": 3,
         }
     }
 
@@ -513,6 +723,8 @@ def home():
       font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }}
     .badge.local {{ background: #064e3b; color: #6ee7b7; border: 1px solid #059669; }}
     .badge.azure {{ background: #1e3a8a; color: #93c5fd; border: 1px solid #2563eb; }}
+    .badge.simulation {{ background: #4c1d95; color: #ddd6fe; border: 1px solid #8b5cf6; }}
+    .badge.auto {{ background: #1e1b4b; color: #c7d2fe; border: 1px solid #6366f1; }}
     .badge.none {{ background: #7c2d12; color: #fdba74; border: 1px solid #ea580c; }}
 
     #messages {{ flex: 1; overflow-y: auto; display: flex; flex-direction: column;
@@ -669,27 +881,39 @@ def home():
         providersData = await res.json();
         
         providerSelect.innerHTML = "";
-        if (providersData.local.available) {{
-          const optLocal = document.createElement("option");
-          optLocal.value = "local";
-          optLocal.textContent = "💻 Modelo Local (.gguf)";
-          providerSelect.appendChild(optLocal);
-        }}
-        if (providersData.azure.available) {{
+
+        // 1. Triple Contingencia Estricta (Automático)
+        const optAuto = document.createElement("option");
+        optAuto.value = "auto";
+        optAuto.textContent = "🔄 Triple Contingencia (Auto: Azure ➔ Local ➔ Simulación)";
+        providerSelect.appendChild(optAuto);
+
+        // 2. Azure Foundry (Prioridad 1)
+        if (providersData.azure && providersData.azure.available) {{
           const optAzure = document.createElement("option");
           optAzure.value = "azure";
-          optAzure.textContent = "☁️ Microsoft Azure Foundry";
+          optAzure.textContent = "☁️ Prioridad 1: Microsoft Azure Foundry";
           providerSelect.appendChild(optAzure);
         }}
-        if (!providersData.local.available && !providersData.azure.available) {{
-          const optNone = document.createElement("option");
-          optNone.value = "none";
-          optNone.textContent = "⚠️ Sin configurar (.env)";
-          providerSelect.appendChild(optNone);
+
+        // 3. Modelos Locales Edge AI (Prioridad 2)
+        if (providersData.local && providersData.local.available) {{
+          const optLocal = document.createElement("option");
+          optLocal.value = "local";
+          optLocal.textContent = "💻 Prioridad 2: Local Edge AI (.gguf)";
+          providerSelect.appendChild(optLocal);
         }}
 
-        if (providersData.default_provider && providersData.default_provider !== "none") {{
+        // 4. Modo Simulación de Emergencia (Prioridad 3)
+        const optSim = document.createElement("option");
+        optSim.value = "simulation";
+        optSim.textContent = "📜 Prioridad 3: Modo Simulación (Offline)";
+        providerSelect.appendChild(optSim);
+
+        if (providersData.default_provider && ["auto", "azure", "local", "simulation"].includes(providersData.default_provider)) {{
           providerSelect.value = providersData.default_provider;
+        }} else {{
+          providerSelect.value = "auto";
         }}
         updateModelDropdown();
       }} catch (err) {{
@@ -701,7 +925,44 @@ def home():
     function updateModelDropdown() {{
       modelSelect.innerHTML = "";
       const chosen = providerSelect.value;
-      if (chosen === "local" && providersData && providersData.local.models.length > 0) {{
+
+      if (chosen === "auto") {{
+        if (providersData && providersData.azure && providersData.azure.available) {{
+          modelSelect.style.display = "inline-block";
+          modelLabel.style.display = "inline-block";
+          const opt = document.createElement("option");
+          opt.value = providersData.azure.deployment;
+          opt.textContent = providersData.azure.deployment;
+          modelSelect.appendChild(opt);
+          badge.className = "badge azure";
+          badge.textContent = "Prioridad 1 (Activo): Azure Cloud (" + providersData.azure.deployment + ")";
+        }} else if (providersData && providersData.local && providersData.local.available && providersData.local.models.length > 0) {{
+          modelSelect.style.display = "inline-block";
+          modelLabel.style.display = "inline-block";
+          providersData.local.models.forEach(m => {{
+            const opt = document.createElement("option");
+            opt.value = m.path;
+            opt.textContent = m.name;
+            modelSelect.appendChild(opt);
+          }});
+          badge.className = "badge local";
+          badge.textContent = "Prioridad 2 (Activo): Local Edge AI";
+        }} else {{
+          modelSelect.style.display = "none";
+          modelLabel.style.display = "none";
+          badge.className = "badge simulation";
+          badge.textContent = "Prioridad 3 (Activo): Simulación de Emergencia";
+        }}
+      }} else if (chosen === "azure" && providersData && providersData.azure.available) {{
+        modelSelect.style.display = "inline-block";
+        modelLabel.style.display = "inline-block";
+        const opt = document.createElement("option");
+        opt.value = providersData.azure.deployment;
+        opt.textContent = providersData.azure.deployment;
+        modelSelect.appendChild(opt);
+        badge.className = "badge azure";
+        badge.textContent = "Prioridad 1: Azure Cloud (" + providersData.azure.deployment + ")";
+      }} else if (chosen === "local" && providersData && providersData.local.available && providersData.local.models.length > 0) {{
         modelSelect.style.display = "inline-block";
         modelLabel.style.display = "inline-block";
         providersData.local.models.forEach(m => {{
@@ -711,28 +972,19 @@ def home():
           modelSelect.appendChild(opt);
         }});
         badge.className = "badge local";
-        badge.textContent = "Modo Local: " + modelSelect.options[modelSelect.selectedIndex].text;
-      }} else if (chosen === "azure" && providersData && providersData.azure.available) {{
-        modelSelect.style.display = "inline-block";
-        modelLabel.style.display = "inline-block";
-        const opt = document.createElement("option");
-        opt.value = providersData.azure.deployment;
-        opt.textContent = providersData.azure.deployment;
-        modelSelect.appendChild(opt);
-        badge.className = "badge azure";
-        badge.textContent = "Azure Cloud: " + providersData.azure.deployment;
+        badge.textContent = "Prioridad 2: Local (" + (modelSelect.options[modelSelect.selectedIndex]?.text || "GGUF") + ")";
       }} else {{
         modelSelect.style.display = "none";
         modelLabel.style.display = "none";
-        badge.className = "badge none";
-        badge.textContent = "Sin modelos configurados";
+        badge.className = "badge simulation";
+        badge.textContent = "Prioridad 3: Modo Simulación (Jujutsu_encyclopedia.md)";
       }}
     }}
 
     providerSelect.addEventListener("change", updateModelDropdown);
     modelSelect.addEventListener("change", () => {{
-      if (providerSelect.value === "local") {{
-        badge.textContent = "Modo Local: " + modelSelect.options[modelSelect.selectedIndex].text;
+      if (providerSelect.value === "local" || (providerSelect.value === "auto" && !providersData.azure?.available)) {{
+        badge.textContent = "Prioridad 2: Local (" + modelSelect.options[modelSelect.selectedIndex]?.text + ")";
       }}
     }});
 
@@ -798,12 +1050,19 @@ def home():
         pendingBubble.textContent = data.answer || "Sin respuesta del hechicero.";
         pendingBubble.parentElement.classList.remove("status");
         
-        // Etiqueta del hechicero y motor
+        // Etiqueta del hechicero y motor según modo de contingencia
         if (data.personality_tag || data.model) {{
           const tagElem = document.createElement("div");
           tagElem.className = "message-tag";
           const pTag = data.personality_tag || "♾️ Asistente";
-          const mTag = data.mode === "local" ? `💻 Local (${{data.model}})` : `☁️ Azure (${{data.model}})`;
+          let mTag = "";
+          if (data.mode === "azure") {{
+            mTag = `☁️ Prioridad 1: Azure Cloud (${{data.model}})`;
+          }} else if (data.mode === "local") {{
+            mTag = `💻 Prioridad 2: Local Edge AI (${{data.model}})`;
+          }} else {{
+            mTag = `📜 Prioridad 3: Simulación Canónica (${{data.model || "Jujutsu_encyclopedia.md"}})`;
+          }}
           tagElem.textContent = `${{pTag}} · ${{mTag}}`;
           pendingBubble.parentElement.insertBefore(tagElem, pendingBubble);
         }}
@@ -816,7 +1075,7 @@ def home():
           pendingBubble.parentElement.insertBefore(vowElem, pendingBubble);
         }}
 
-        // Fuentes canónicas RAG
+        // Fuentes canónicas RAG / Enciclopedia
         if (data.sources && data.sources.length > 0) {{
           const sourcesElem = document.createElement("div");
           sourcesElem.className = "message-sources";
@@ -841,11 +1100,11 @@ def home():
 
 @app.post("/chat")
 def chat(request: ChatRequest):
-    # Determinar proveedor objetivo
-    provider = request.provider
-    if not provider or provider == "none":
-        provider = get_default_provider()
-
+    """Ejecuta la inferencia bajo una estructura de Triple Contingencia (Triple Fallback) estricta:
+    1. PRIORIDAD 1 (Azure Cloud): Si .env tiene credenciales válidas para Azure AI Foundry, realiza inferencia primaria con Microsoft.
+    2. PRIORIDAD 2 (Edge AI / Modelos locales): Si Azure no está configurado o falla, busca archivos .gguf en /models y ejecuta localmente.
+    3. PRIORIDAD 3 (Modo Simulación): Si no hay llaves de Azure Y /models está vacía (o local falla), lee directamente Jujutsu_encyclopedia.md y escupe la información canónica estructurada.
+    """
     # Personalidad de Grado Especial y Voto Vinculante
     pkey = (request.personality or "gojo").lower().strip()
     if pkey not in PERSONALITY_PROMPTS:
@@ -871,129 +1130,103 @@ def chat(request: ChatRequest):
     # Voto Vinculante 'Revelar la Técnica': respuestas el doble de extensas (1200 tokens vs 600)
     max_tokens_val = 1200 if reveal else 600
 
-    # 1. MODO LOCAL (.GGUF)
-    if provider == "local":
-        local_models = find_local_models()
-        if not local_models:
-            raise HTTPException(
-                status_code=503,
-                detail="No se encontraron modelos .gguf en la carpeta './models' ni en LOCAL_MODEL_PATH.",
-            )
+    provider_pref = (request.provider or "auto").lower().strip()
 
-        # Elegir ruta del modelo
-        chosen_path = request.model
-        if not chosen_path or not os.path.isfile(chosen_path):
-            chosen_path = local_models[0]["path"]
+    # =========================================================================
+    # PRIORIDAD 1 (Azure Cloud): Inferencia primaria en la nube de Microsoft
+    # =========================================================================
+    should_try_azure = (provider_pref in ("auto", "azure")) and is_azure_configured()
 
-        model_display_name = Path(chosen_path).name
-
-        try:
-            n_ctx = int(os.environ.get("LOCAL_N_CTX", "4096"))
-            n_gpu = int(os.environ.get("LOCAL_N_GPU_LAYERS", "0"))
-            llm = get_local_llm(chosen_path, n_ctx=n_ctx, n_gpu_layers=n_gpu)
-
-            try:
-                output = llm.create_chat_completion(
-                    messages=[
-                        {"role": "system", "content": system_instructions},
-                        {"role": "user", "content": user_query},
-                    ],
-                    max_tokens=max_tokens_val,
-                    temperature=0.1,
-                )
-            except ValueError as ve:
-                if "system" in str(ve).lower():
-                    # Compatibilidad con Gemma y modelos que no admiten rol 'system'
-                    logger.info("El modelo no admite rol de sistema directo; adaptando en el turno de usuario.")
-                    prompt_combinado = f"{system_instructions}\n\nPregunta del usuario:\n{user_query}\n\nRespuesta canónica de {p_info['name']}:"
-                    output = llm.create_chat_completion(
-                        messages=[{"role": "user", "content": prompt_combinado}],
-                        max_tokens=max_tokens_val,
-                        temperature=0.1,
-                    )
-                else:
-                    raise
-
-            answer = output["choices"][0]["message"]["content"] or "Sin respuesta del modelo local."
-            return {
-                "answer": answer,
-                "mode": "local",
-                "model": model_display_name,
-                "personality": pkey,
-                "personality_tag": p_info["tag"],
-                "reveal_technique": reveal,
-                "sources": sources
-            }
-        except Exception as err:
-            logger.exception("Error al procesar con el modelo local GGUF.")
-            err_desc = str(err).strip() or type(err).__name__
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error en el modelo local: {err_desc}",
-            ) from None
-
-    # 2. MODO CLOUD (AZURE FOUNDRY)
-    elif provider == "azure":
+    if should_try_azure:
         endpoint = (os.environ.get("FOUNDRY_PROJECT_ENDPOINT") or "").strip()
         deployment = (
-            request.model
-            or os.environ.get("MODEL_DEPLOYMENT_NAME")
-            or os.environ.get("FOUNDRY_MODEL_NAME")
-            or ""
+            request.model if (provider_pref == "azure" and request.model)
+            else (os.environ.get("MODEL_DEPLOYMENT_NAME") or os.environ.get("FOUNDRY_MODEL_NAME") or "")
         ).strip()
 
-        missing = []
-        if not endpoint or endpoint == "tu_endpoint_de_azure_aqui" or not endpoint.startswith("https://"):
-            missing.append("FOUNDRY_PROJECT_ENDPOINT (URL válida https://...)")
-        if not deployment:
-            missing.append("MODEL_DEPLOYMENT_NAME o FOUNDRY_MODEL_NAME")
-
-        if missing:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Falta configurar en .env para Azure: {', '.join(missing)}.",
-            )
-
+        logger.info("[PRIORIDAD 1: AZURE CLOUD] Intentando inferencia primaria con Azure Foundry (%s)...", deployment)
         try:
-            client = get_openai_client(endpoint)
-            response = client.responses.create(
-                model=deployment,
-                instructions=system_instructions,
-                input=user_query,
-                max_output_tokens=max_tokens_val,
+            answer = execute_azure_chat(
+                endpoint,
+                deployment,
+                system_instructions,
+                user_query,
+                max_tokens_val
             )
-            answer = getattr(response, "output_text", None) or "El modelo no generó una respuesta de texto."
             return {
                 "answer": answer,
                 "mode": "azure",
                 "model": deployment,
+                "contingency_level": "Prioridad 1 (Azure Cloud)",
                 "personality": pkey,
                 "personality_tag": p_info["tag"],
                 "reveal_technique": reveal,
                 "sources": sources
             }
-        except (AzureError, OpenAIError) as err:
-            logger.exception("No se pudo obtener respuesta de Microsoft Foundry.")
-            raise HTTPException(
-                status_code=502,
-                detail=f"No fue posible contactar a Azure Foundry: {err}",
-            ) from None
         except Exception as err:
-            logger.exception("Error inesperado en /chat con Azure.")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Error interno del servidor: {err}",
-            ) from None
-
-    # 3. NINGÚN PROVEEDOR ACTIVO
+            logger.warning("[FALLBACK P1 -> P2] Error en Azure Cloud (%s): %s. Pasando a Prioridad 2 (Edge AI Local)...", type(err).__name__, err)
+    elif provider_pref == "azure" and not is_azure_configured():
+        logger.warning("[PRIORIDAD 1] Azure solicitado explícitamente pero no configurado en .env. Pasando a Prioridad 2...")
     else:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "No hay ningún modelo configurado. "
-                "Coloca archivos .gguf en la carpeta './models' o configura tus credenciales de Azure en .env."
-            ),
+        logger.info("[PRIORIDAD 1] Credenciales de Azure no configuradas o modo local/simulación solicitado. Evaluando Prioridad 2...")
+
+    # =========================================================================
+    # PRIORIDAD 2 (Edge AI / Modelos locales): Inferencia con archivos .gguf en /models
+    # =========================================================================
+    should_try_local = provider_pref in ("auto", "local", "azure")
+    local_models = find_local_models()
+
+    if should_try_local and local_models:
+        chosen_path = (
+            request.model if (provider_pref == "local" and request.model and os.path.isfile(request.model))
+            else local_models[0]["path"]
         )
+        model_name = Path(chosen_path).name
+
+        logger.info("[PRIORIDAD 2: EDGE AI LOCAL] Intentando inferencia local con %s...", model_name)
+        try:
+            answer = execute_local_chat(
+                chosen_path,
+                system_instructions,
+                user_query,
+                max_tokens_val,
+                p_info["name"]
+            )
+            return {
+                "answer": answer,
+                "mode": "local",
+                "model": model_name,
+                "contingency_level": "Prioridad 2 (Edge AI Local)",
+                "personality": pkey,
+                "personality_tag": p_info["tag"],
+                "reveal_technique": reveal,
+                "sources": sources
+            }
+        except Exception as err:
+            logger.warning("[FALLBACK P2 -> P3] Error en inferencia local con %s (%s): %s. Pasando a Prioridad 3 (Modo Simulación)...", model_name, type(err).__name__, err)
+    else:
+        logger.info("[PRIORIDAD 2] Sin modelos .gguf en carpeta /models o inferencia local fallida. Pasando a Prioridad 3...")
+
+    # =========================================================================
+    # PRIORIDAD 3 (Modo Simulación): Extracción directa desde Jujutsu_encyclopedia.md
+    # =========================================================================
+    logger.info("[PRIORIDAD 3: MODO SIMULACIÓN] Extrayendo información canónica estructurada desde Jujutsu_encyclopedia.md...")
+    sim_data = get_emergency_simulation_response(
+        pkey,
+        user_query,
+        reveal
+    )
+
+    return {
+        "answer": sim_data["answer"],
+        "mode": "simulation",
+        "model": "Jujutsu_encyclopedia.md",
+        "contingency_level": "Prioridad 3 (Modo Simulación de Emergencia)",
+        "personality": pkey,
+        "personality_tag": p_info["tag"],
+        "reveal_technique": reveal,
+        "sources": sim_data.get("sources", sources)
+    }
 
 
 if __name__ == "__main__":
