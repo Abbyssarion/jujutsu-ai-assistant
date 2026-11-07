@@ -1,0 +1,34 @@
+# Entornos virtuales
+.venv/
+venv/
+ENV/
+env/
+
+# Archivos de entorno y credenciales
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# VS Code y editores
+.vscode/*
+!.vscode/settings.json
+.idea/
+
+# Archivos temporales del sistema
+.DS_Store
+Thumbs.db
+# Modelos locales de IA
+*.gguf
+models/*
+!models/.gitkeep
